@@ -1,78 +1,120 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from io import BytesIO
 
-st.set_page_config(page_title="아이에스동서 환경데이터 자동화", layout="wide")
+st.set_page_config(page_title="ESG 환경데이터 컨트롤 타워", layout="wide")
 
-st.title("📊 지속가능경영보고서 환경데이터 자동 취합 시스템")
-st.write("각 지점별 Raw Data를 아래 표에 입력하면, '2. 환경' 시트 양식에 맞게 온실가스 배출량이 자동 계산된 엑셀 파일을 만들어 줍니다.")
+# 1. 엑셀을 대체할 '내부 데이터베이스(DB)' 만들기 (저장 기능)
+conn = sqlite3.connect('esg_database.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('''
+    CREATE TABLE IF NOT EXISTS energy_data (
+        branch TEXT PRIMARY KEY,
+        elec_kwh REAL, gas_nm3 REAL, gasoline_l REAL, diesel_l REAL, kerosene_l REAL
+    )
+''')
+conn.commit()
 
-# 1. 2025년 단위변환 매뉴얼 계수 (TJ 변환용)
-factors = {
-    "휘발유(L)": 0.000033,
-    "등유(L)": 0.000037,
-    "경유(L)": 0.000038,
-    "천연가스(kg)": 0.000055,
-    "도시가스(Nm3)": 0.000043,
-    "전기_소비(kWh)": 0.000010
+# 2. 단위 변환 계수 (TJ 변환)
+FACTORS = {
+    "전기": 0.000010, "도시가스": 0.000043, "휘발유": 0.000033, "경유": 0.000038, "등유": 0.000037
 }
 
-# 2. 지점별 미니 엑셀 표(데이터 에디터) 만들기
-st.subheader("📝 지점별 Raw Data 입력 (숫자만 입력하세요)")
+st.title("🌱 아이에스동서 '2. 환경' 통합 데이터 시스템")
+st.write("지점별 Raw Data를 입력하면 [조직 내외부 에너지 소비] TJ 단위로 자동 변환 및 저장됩니다.")
 
-# 기본 표 뼈대 만들기
-branches = ["본사/지사", "건축공사", "이천공장", "청양공장", "음성공장"]
-columns = ["전기_소비(kWh)", "도시가스(Nm3)", "휘발유(L)", "경유(L)", "등유(L)", "천연가스(kg)"]
+# 상단 탭 3개 생성
+tab1, tab2, tab3 = st.tabs(["📝 1. 지점별 Raw Data 입력", "📊 2. [조직 내외부 에너지 소비] 확인", "📥 3. 최종 엑셀 다운로드"])
 
-# 빈 데이터프레임(표) 생성
-raw_data_df = pd.DataFrame(0, index=branches, columns=columns)
-
-# 웹페이지에 수정 가능한 표 띄우기
-edited_df = st.data_editor(raw_data_df, use_container_width=True)
-
-# 3. 엑셀 다운로드 마법진 구성
-st.subheader("📥 완성된 '2. 환경' 시트 엑셀 다운로드")
-
-if st.button("✨ 데이터 계산 및 엑셀 만들기"):
-    # Scope 1 (직접배출: 전기 제외 나머지 연료 합산) 및 Scope 2 (전기) 계산 로직
-    result_data = []
+# ==========================================
+# 탭 1: 지점 담당자용 입력 화면
+# ==========================================
+with tab1:
+    st.subheader("지점별 에너지 사용량 직접 입력")
+    branch_list = ["본사/지사", "건축공사", "이천공장", "청양공장", "음성공장"]
+    selected_branch = st.selectbox("데이터를 입력할 지점을 선택하세요.", branch_list)
     
-    for branch in branches:
-        # 각 연료별 사용량 * 변환계수
-        scope1_tj = (
-            edited_df.loc[branch, "도시가스(Nm3)"] * factors["도시가스(Nm3)"] +
-            edited_df.loc[branch, "휘발유(L)"] * factors["휘발유(L)"] +
-            edited_df.loc[branch, "경유(L)"] * factors["경유(L)"] +
-            edited_df.loc[branch, "등유(L)"] * factors["등유(L)"] +
-            edited_df.loc[branch, "천연가스(kg)"] * factors["천연가스(kg)"]
-        )
-        scope2_tj = edited_df.loc[branch, "전기_소비(kWh)"] * factors["전기_소비(kWh)"]
+    # DB에서 기존에 저장된 데이터 불러오기
+    c.execute("SELECT elec_kwh, gas_nm3, gasoline_l, diesel_l, kerosene_l FROM energy_data WHERE branch=?", (selected_branch,))
+    row = c.fetchone()
+    default = row if row else (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # 입력 폼
+    with st.form("data_input_form"):
+        st.info("※ 영수증/고지서 기준의 원시 데이터(Raw Data) 단위를 그대로 입력해 주세요.")
+        col1, col2 = st.columns(2)
+        with col1:
+            elec = st.number_input("전기 사용량 (kWh)", value=float(default[0]), format="%f")
+            gasoline = st.number_input("휘발유 사용량 (L)", value=float(default[2]), format="%f")
+            kerosene = st.number_input("등유 사용량 (L)", value=float(default[4]), format="%f")
+        with col2:
+            gas = st.number_input("도시가스 사용량 (Nm3)", value=float(default[1]), format="%f")
+            diesel = st.number_input("경유 사용량 (L)", value=float(default[3]), format="%f")
         
-        result_data.append([branch, scope1_tj, scope2_tj])
-    
-    # 계산된 결과를 '2. 환경' 양식처럼 표로 만들기
-    final_df = pd.DataFrame(result_data, columns=["지점명", "Scope 1 (TJ)", "Scope 2 (TJ)"])
-    final_df = final_df.set_index("지점명").T # 행과 열을 뒤집어서 원본 엑셀 양식처럼 배치
-    
-    # 합산 열(합계) 추가
-    final_df["합산"] = final_df.sum(axis=1)
-    
-    st.write("✅ **미리보기 (계산 완료)**")
-    st.dataframe(final_df)
+        # 저장 버튼
+        if st.form_submit_button("💾 데이터 DB에 영구 저장"):
+            c.execute('''
+                REPLACE INTO energy_data (branch, elec_kwh, gas_nm3, gasoline_l, diesel_l, kerosene_l)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (selected_branch, elec, gas, gasoline, diesel, kerosene))
+            conn.commit()
+            st.success(f"[{selected_branch}] 데이터가 안전하게 저장되었습니다! (탭 2에서 결과를 확인하세요)")
 
-    # 엑셀 파일로 굽기 (저장)
-    excel_buffer = BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        final_df.to_excel(writer, sheet_name="2. 환경_자동계산결과")
+# ==========================================
+# 탭 2: 지현 님용 (자동 변환된 '2. 환경' 시트 뷰)
+# ==========================================
+with tab2:
+    st.subheader("📊 [조직 내외부 에너지 소비] 자동 계산 결과 (단위: TJ)")
     
-    excel_data = excel_buffer.getvalue()
+    # DB에서 전체 데이터 읽어오기
+    df = pd.read_sql_query("SELECT * FROM energy_data", conn)
     
-    # 다운로드 버튼 생성
-    st.download_button(
-        label="📊 [2026 지속가능경영보고서_환경데이터_완성본.xlsx] 다운로드",
-        data=excel_data,
-        file_name="2026_지속가능경영보고서_환경데이터_완성본.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
-    st.balloons()
+    if not df.empty:
+        # 지점명을 인덱스로 설정
+        df.set_index("branch", inplace=True)
+        
+        # 새로운 결과용 데이터프레임 생성
+        result_df = pd.DataFrame(index=df.index)
+        
+        # Raw Data를 매뉴얼 계수를 곱해 TJ로 변환하여 저장
+        result_df["연료(Scope 1) 사용량 (TJ)"] = (
+            df["gas_nm3"] * FACTORS["도시가스"] +
+            df["gasoline_l"] * FACTORS["휘발유"] +
+            df["diesel_l"] * FACTORS["경유"] +
+            df["kerosene_l"] * FACTORS["등유"]
+        )
+        result_df["전기(Scope 2) 사용량 (TJ)"] = df["elec_kwh"] * FACTORS["전기"]
+        result_df["총 에너지 소비량 (TJ)"] = result_df["연료(Scope 1) 사용량 (TJ)"] + result_df["전기(Scope 2) 사용량 (TJ)"]
+        
+        # 엑셀 양식처럼 보기 좋게 행/열을 뒤집기(Transpose)
+        display_df = result_df.T
+        display_df["합계(전체)"] = display_df.sum(axis=1) # 전체 합산 열 추가
+        
+        # 화면에 표 출력
+        st.dataframe(display_df, use_container_width=True)
+    else:
+        st.warning("아직 저장된 지점 데이터가 없습니다. 탭 1에서 데이터를 입력해 주세요.")
+
+# ==========================================
+# 탭 3: 최종 엑셀 파일 생성
+# ==========================================
+with tab3:
+    st.subheader("📥 작성 완료된 '2. 환경' 양식 다운로드")
+    st.write("DB에 저장된 데이터와 위에서 변환된 TJ 값을 바탕으로 최종 엑셀을 생성합니다.")
+    
+    if not df.empty and st.button("✨ 최종 엑셀 파일 만들기"):
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            # 원시 데이터(Raw) 시트 백업
+            df.to_excel(writer, sheet_name="Raw Data(입력값)")
+            # 2.환경 (TJ 변환) 시트 생성
+            display_df.to_excel(writer, sheet_name="2. 환경")
+            
+        st.download_button(
+            label="엑셀 다운로드 (2026_지속가능경영보고서_환경.xlsx)",
+            data=excel_buffer.getvalue(),
+            file_name="2026_지속가능경영보고서_환경.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
