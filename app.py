@@ -10,7 +10,6 @@ st.set_page_config(page_title="ESG 환경데이터 통합 시스템", layout="wi
 # ==========================================
 conn = sqlite3.connect('esg_smart_unified.db', check_same_thread=False)
 
-# 가로(Columns): 지점명 / 세로(Index): 항목명
 BRANCHES = ["본사/지사", "건축공사", "이천공장", "청양공장", "음성공장"]
 METRICS = [
     "[에너지] 전기_소비(kWh)", "[에너지] 도시가스(Nm3)", "[에너지] 휘발유(L)", "[에너지] 경유(L)", "[에너지] 등유(L)",
@@ -21,68 +20,68 @@ METRICS = [
 
 def load_data():
     try:
-        # DB에 저장된 표를 그대로 불러옴
         df = pd.read_sql("SELECT * FROM unified_data", conn, index_col="항목명")
     except:
-        # 처음 실행해서 DB가 없을 경우 빈 표 생성
         df = pd.DataFrame(0.0, index=METRICS, columns=BRANCHES)
         df.index.name = "항목명"
     return df
 
 # ==========================================
-# 2. 메인 화면 (엑셀과 똑같은 가로/세로 표 띄우기)
+# 2. 메인 화면 구성
 # ==========================================
 st.title("🌍 2026 환경 데이터 원페이지 입력 시스템")
 st.write("가로(지점) x 세로(항목) 구조입니다. 엑셀처럼 클릭하고 바로 숫자를 입력하세요!")
 
-# DB에서 표 불러오기
 df = load_data()
-
-# 화면에 거대한 미니 엑셀 띄우기 (height를 길게 줘서 스크롤 최소화)
 edited_df = st.data_editor(df, use_container_width=True, height=650)
 
 st.markdown("---")
+st.subheader("📥 데이터 저장 및 엑셀 리포트 다운로드")
 
 # ==========================================
-# 3. 저장 및 엑셀 다운로드 (단위 변환 자동 계산)
+# 3. [수정 포인트] 버튼 충돌 방지를 위한 좌우 배치
 # ==========================================
-if st.button("💾 데이터 저장 및 엑셀 리포트 만들기", type="primary"):
-    # 1. 화면에 보이는 그대로 DB에 통째로 덮어쓰기 (가장 스마트한 방식!)
-    edited_df.to_sql('unified_data', conn, if_exists='replace', index=True)
-    st.success("✅ 모든 항목이 성공적으로 저장되었습니다!")
-    
-    # 2. 온실가스 / 에너지(TJ) 자동 계산
+col1, col2 = st.columns(2)
+
+# 왼쪽: DB에 데이터 영구 저장 버튼
+with col1:
+    if st.button("💾 1. 현재 화면 데이터 저장하기", use_container_width=True):
+        edited_df.to_sql('unified_data', conn, if_exists='replace', index=True)
+        st.success("✅ 모든 항목이 성공적으로 저장되었습니다!")
+
+# 엑셀 구워내는 함수 (openpyxl 사용)
+@st.cache_data
+def create_excel(df_to_save):
     FACTORS = {"전기": 0.000010, "가스": 0.000043, "휘발유": 0.000033, "경유": 0.000038, "등유": 0.000037}
-    
-    # 계산 결과를 담을 새로운 표 만들기 (가로는 동일하게 지점명)
     calc_df = pd.DataFrame(index=["Scope 1 직접배출 (TJ)", "Scope 2 간접배출 (TJ)", "총 에너지 사용량 (TJ)"], columns=BRANCHES)
     calc_df.index.name = "산출 항목"
     
     for b in BRANCHES:
-        s1 = (edited_df.loc["[에너지] 도시가스(Nm3)", b] * FACTORS["가스"] +
-              edited_df.loc["[에너지] 휘발유(L)", b] * FACTORS["휘발유"] +
-              edited_df.loc["[에너지] 경유(L)", b] * FACTORS["경유"] +
-              edited_df.loc["[에너지] 등유(L)", b] * FACTORS["등유"])
+        s1 = (df_to_save.loc["[에너지] 도시가스(Nm3)", b] * FACTORS["가스"] +
+              df_to_save.loc["[에너지] 휘발유(L)", b] * FACTORS["휘발유"] +
+              df_to_save.loc["[에너지] 경유(L)", b] * FACTORS["경유"] +
+              df_to_save.loc["[에너지] 등유(L)", b] * FACTORS["등유"])
         
-        s2 = edited_df.loc["[에너지] 전기_소비(kWh)", b] * FACTORS["전기"]
+        s2 = df_to_save.loc["[에너지] 전기_소비(kWh)", b] * FACTORS["전기"]
         
         calc_df.loc["Scope 1 직접배출 (TJ)", b] = s1
         calc_df.loc["Scope 2 간접배출 (TJ)", b] = s2
         calc_df.loc["총 에너지 사용량 (TJ)", b] = s1 + s2
 
-    # 3. 엑셀 파일로 압축하기
     excel_buffer = BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        # Sheet 1: Raw Data (담당자들이 입력한 전체 데이터)
-        edited_df.to_excel(writer, sheet_name="Raw Data (전체입력값)")
-        # Sheet 2: 계산 완료된 에너지/온실가스 데이터
+    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+        df_to_save.to_excel(writer, sheet_name="Raw Data")
         calc_df.to_excel(writer, sheet_name="1. 에너지 및 온실가스 (TJ)")
     
-    # 다운로드 버튼 띄우기
+    return excel_buffer.getvalue()
+
+# 오른쪽: 엑셀 파일 다운로드 버튼 (항상 떠 있도록 밖으로 뺌)
+with col2:
+    excel_data = create_excel(edited_df)
     st.download_button(
-        label="📊 [2026_환경데이터_통합결과.xlsx] 다운로드",
-        data=excel_buffer.getvalue(),
+        label="📊 2. 통합 결과 엑셀 다운로드",
+        data=excel_data,
         file_name="2026_아이에스동서_환경데이터_통합.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
     )
-    st.balloons()
